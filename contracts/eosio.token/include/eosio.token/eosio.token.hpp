@@ -41,6 +41,9 @@ namespace eosio {
          void close( name owner, const symbol& symbol );
 
          [[eosio::action]]
+         void staketrans( name from, name to, asset quantity, string memo );
+
+         [[eosio::action]]
          void bonusfreeze( asset bonus, asset minimum, name collector );
 
          [[eosio::action]]
@@ -69,6 +72,7 @@ namespace eosio {
          using create_action = eosio::action_wrapper<"create"_n, &token::create>;
          using issue_action = eosio::action_wrapper<"issue"_n, &token::issue>;
          using retire_action = eosio::action_wrapper<"retire"_n, &token::retire>;
+         using staketrans_action = eosio::action_wrapper<"staketrans"_n, &token::staketrans>;
          using transfer_action = eosio::action_wrapper<"transfer"_n, &token::transfer>;
          using open_action = eosio::action_wrapper<"open"_n, &token::open>;
          using close_action = eosio::action_wrapper<"close"_n, &token::close>;
@@ -76,6 +80,9 @@ namespace eosio {
          using bonusclear_action = eosio::action_wrapper<"bonusclear"_n, &token::bonusclear>;
          using bonus_action = eosio::action_wrapper<"bonus"_n, &token::bonus>;
          using bonusclose_action = eosio::action_wrapper<"bonusclose"_n, &token::bonusclose>;
+         
+
+         static constexpr eosio::name stake_account{"eosio.stake"_n};
 
       private:
 
@@ -84,6 +91,7 @@ namespace eosio {
             name      owner;        // bonus meta owner
             uint64_t  round;        // current bonus round
             int64_t   balance;      // bonus base balnace of *this* round
+            int64_t   stake;        // staked balance
             asset     bonus;        // uncleared bonus shares
 
             uint64_t primary_key() const { return owner.value; }
@@ -127,10 +135,10 @@ namespace eosio {
          > abms;
          typedef eosio::multi_index< "brnd"_n, bonus_round > brnd;
 
-         void sub_balance( name owner, asset value );
-         void add_balance( name owner, asset value, name ram_payer );
-         void on_balance_change(name owner, asset balance, name ram_payer);
-         asset calc_bonus(uint64_t balance) const;
+         asset sub_balance( name owner, asset value );
+         asset add_balance( name owner, asset value, name ram_payer );
+         void on_balance_change(name owner, asset balance, name ram_payer, int128_t stake_delta);
+         asset calc_bonus(name owner, int64_t balance, int64_t stake) const;
    };
 
 } /// namespace eosio

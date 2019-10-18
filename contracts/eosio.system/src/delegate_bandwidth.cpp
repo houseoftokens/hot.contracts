@@ -402,10 +402,17 @@ namespace eosiosystem {
 
          auto transfer_amount = net_balance + cpu_balance;
          if ( 0 < transfer_amount.amount ) {
-            INLINE_ACTION_SENDER(eosio::token, transfer)(
-               token_account, { {source_stake_from, active_permission} },
-               { source_stake_from, stake_account, asset(transfer_amount), std::string("stake bandwidth") }
-            );
+            if ( transfer ) {
+               INLINE_ACTION_SENDER(eosio::token, staketrans)(
+                  token_account, { {source_stake_from, active_permission} },
+                  { source_stake_from, receiver, asset(transfer_amount), std::string("stake bandwidth") }
+               );
+            } else {
+               INLINE_ACTION_SENDER(eosio::token, transfer)(
+                  token_account, { {source_stake_from, active_permission} },
+                  { source_stake_from, stake_account, asset(transfer_amount), std::string("stake bandwidth") }
+               );
+            }
          }
       }
 

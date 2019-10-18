@@ -50,9 +50,10 @@ void token::issue( name to, asset quantity, string memo )
        s.supply += quantity;
     });
 
-    add_balance( st.issuer, quantity, st.issuer );
+    auto balance = add_balance( st.issuer, quantity, st.issuer );
+    on_balance_change(st.issuer, balance, st.issuer, 0);
 
-    if( to != st.issuer ) {
+    if ( to != st.issuer ) {
       SEND_INLINE_ACTION( *this, transfer, { {st.issuer, "active"_n} },
                           { st.issuer, to, quantity, memo }
       );
@@ -105,11 +106,55 @@ void token::transfer( name    from,
 
     auto payer = has_auth( to ) ? to : from;
 
-    sub_balance( from, quantity );
-    add_balance( to, quantity, payer );
+    int128_t stake = 0;
+    if ( from == stake_account ) {
+       stake = - int128_t(quantity.amount);
+    } else if ( to == stake_account ) {
+       stake = int128_t(quantity.amount);
+    }
+    auto blc_from = sub_balance( from, quantity );
+    on_balance_change(from, blc_from, same_payer, stake);
+    auto blc_to = add_balance( to, quantity, payer );
+    on_balance_change(to, blc_to, payer, stake);
 }
 
-void token::sub_balance( name owner, asset value ) {
+void token::staketrans(    name    from,
+                           name    to,
+                           asset   quantity,
+                           string  memo )
+{
+    check( from != to, "cannot transfer to self" );
+    require_auth( from );
+    check( is_account( to ), "to account does not exist");
+    auto sym = quantity.symbol.code();
+    stats statstable( _self, sym.raw() );
+    const auto& st = statstable.get( sym.raw() );
+
+    require_recipient( from );
+    require_recipient( to );
+
+    check( quantity.is_valid(), "invalid quantity" );
+    check( quantity.amount > 0, "must transfer positive quantity" );
+    check( quantity.symbol == st.supply.symbol, "symbol precision mismatch" );
+    check( memo.size() <= 256, "memo has more than 256 bytes" );
+
+    auto payer = from;
+
+    int128_t stake = int128_t(quantity.amount);
+
+    auto blc_from = sub_balance( from, quantity );
+    on_balance_change( from, blc_from, same_payer, 0 );
+
+    auto zero_quatity = quantity;
+    zero_quatity.amount = 0;
+    auto blc_to = add_balance( to, zero_quatity, from );
+    on_balance_change( to, blc_to, payer, stake );
+
+    auto blc_stake = add_balance( stake_account, quantity, payer );
+    on_balance_change( stake_account, blc_stake, payer, stake );
+}
+
+asset token::sub_balance( name owner, asset value ) {
     accounts from_acnts( _self, owner.value );
     
     const auto& from = from_acnts.get( value.symbol.code().raw(), "no balance object found" );
@@ -119,10 +164,10 @@ void token::sub_balance( name owner, asset value ) {
        a.balance -= value;
        balance = a.balance;
     });
-    on_balance_change(owner, balance, owner);
+   return balance;
 }
 
-void token::add_balance( name owner, asset value, name ram_payer )
+asset token::add_balance( name owner, asset value, name ram_payer )
 {
    accounts to_acnts( _self, owner.value );
    auto to = to_acnts.find( value.symbol.code().raw() );
@@ -138,10 +183,10 @@ void token::add_balance( name owner, asset value, name ram_payer )
         balance = a.balance;
       });      
    }
-   on_balance_change(owner, balance, ram_payer);
+   return balance;
 }
 
-void token::on_balance_change(name owner, asset balance, name ram_payer)
+void token::on_balance_change( name owner, asset balance, name ram_payer, int128_t stake_delta )
 {
    // only update on core asset balance changing
    if ( balance.symbol != HOT_CORE_SYMBOL ) {
@@ -154,31 +199,35 @@ void token::on_balance_change(name owner, asset balance, name ram_payer)
    if (it_latest != bonus_rounds.end()) {
       round_num = it_latest->round;
    }
-
    // update bonus meta
    abms to_abms( _self, HOT_BONUS_SCOPE );
    auto it_to = to_abms.find( owner.value );
    if ( it_to == to_abms.end() ) {
+      check( stake_delta >= 0, "first time stake should not be negtive" );
       // if no abms record, create a new one
       to_abms.emplace( ram_payer, [&]( auto &m ) {
          m.owner = owner;
          m.round = round_num;
          m.balance = balance.amount;
          m.bonus = asset();
+         m.stake = int64_t(stake_delta);
       });
    } else {
+      int64_t stake = int64_t(int128_t(it_to->stake) + stake_delta);
       // compare current round number to abms
       if ( it_to->round + 1 == round_num ) {
          // new round is started since last update
          to_abms.modify( it_to, same_payer, [&]( auto &m ) {   
-            m.bonus = calc_bonus( m.balance );
+            m.bonus = calc_bonus( m.owner, m.balance, m.stake );
             m.round = round_num;
             m.balance = balance.amount;
+            m.stake = stake;
          });
       } else if ( it_to->round == round_num ) {
          // update abms record
          to_abms.modify( it_to, same_payer, [&]( auto &m ) {
             m.balance = balance.amount;
+            m.stake = stake;
          });
       } else {
          // this should not happen
@@ -188,16 +237,22 @@ void token::on_balance_change(name owner, asset balance, name ram_payer)
 }
 
 // caculate bonus of last round
-asset token::calc_bonus(uint64_t balance) const {
+asset token::calc_bonus(name owner, int64_t balance, int64_t stake) const {
    brnd bonus_rounds( _self, HOT_BONUS_SCOPE );
    auto it = bonus_rounds.begin();
    check( it != bonus_rounds.end(), "bonus round not found" );
    check( it->clearing, "calc_bonus should be called during clearing" );
-   uint128_t bonus_val = uint128_t(it->bonus.amount) * uint128_t(balance);
-   bonus_val /= uint128_t(it->clearbase);
+   int128_t bonus_val = 0;
+   if ( owner == stake_account ) {
+      check( balance >= stake, "stake_account's balance should be greater than stake" );
+      bonus_val = int128_t(it->bonus.amount) * int128_t(balance - stake);
+   } else {
+      bonus_val = int128_t(it->bonus.amount) * int128_t(balance + stake);
+   }
+   bonus_val /= int128_t(it->clearbase);
    // asset bonus = it->bonus * balance / it->clearbase;
    asset bonus = it->bonus;
-   bonus.amount = uint64_t(bonus_val);
+   bonus.amount = int64_t(bonus_val);
    return bonus;
 }
 
@@ -218,7 +273,6 @@ void token::open( name owner, const symbol& symbol, name ram_payer )
       acnts.emplace( ram_payer, [&]( auto& a ){
         a.balance = asset{0, symbol};
       });
-      on_balance_change(owner, asset{0, symbol}, ram_payer);
    }
 }
 
@@ -238,7 +292,7 @@ void token::bonusfreeze( asset bonus, asset minimum, name collector )
    check( minimum.is_valid(), "invalid minimum quantity" );
    check( bonus.symbol == minimum.symbol, "bonus and minimum should be the same token" );
    check( bonus.amount > 0, "bonus amount should greator than 0" );
-   check( bonus.amount > minimum.amount, "bonus amount should greator than minimum amount" );
+   check( bonus.amount >= minimum.amount, "bonus amount should not be smaller than minimum amount" );
    check( is_account( collector ), "collector account does not exist");
 
    // check existance of bonus token
@@ -252,7 +306,7 @@ void token::bonusfreeze( asset bonus, asset minimum, name collector )
    stats stat_core( _self, HOT_CORE_SYMBOL.code().raw() );
    auto it_stat_core = stat_core.find( HOT_CORE_SYMBOL.code().raw() );
    check( it_stat_core != stat_core.end(), "core asset token does not exist, cannot freeze bonus" );
-   uint64_t supply = it_stat_core->supply.amount;
+   int64_t supply = it_stat_core->supply.amount;
 
    // update round info
    brnd bonus_rounds( _self, HOT_BONUS_SCOPE );
@@ -311,10 +365,10 @@ void token::bonusclear()
    }
 
    if ( bonus_accs.size() < HOT_BONUS_ACT_PER_ROUND ) {
-      // check account whose balance has updated during freeze
+      // check account whose balance has been updated after freeze
       auto index = to_abms.get_index<"bybonus"_n>();
       for (auto it = index.rbegin(); bonus_accs.size() < HOT_BONUS_ACT_PER_ROUND; ++it) {
-         if (it == index.rend() || it->bonus.amount == 0) {
+         if (it == index.rend() || it->bonus.amount <= 0) {
             // done clear
             done_clear = true;
             break;
@@ -330,21 +384,7 @@ void token::bonusclear()
 
    // we are done clear
    if (done_clear) {
-      auto it_br = bonus_rounds.begin();
-      check( it_br != bonus_rounds.end(), "bonus round not found" );
-      if (it_br->balance.amount > 0) {
-         // send all left bonus to issuer
-         SEND_INLINE_ACTION( *this, bonusclose, { {st.issuer, "active"_n} }, { false } );
-      }
-      // // mark this round as finished
-      // bonus_rounds.modify( *it_br, same_payer, [&]( auto& br ) {
-      //    br.clearing = false;
-      //    br.clearbase = 0;
-      //    br.bonus = asset();
-      //    br.minmum_bonus = asset();
-      //    br.balance = asset();
-      //    br.collector = name();
-      // });
+      SEND_INLINE_ACTION( *this, bonusclose, { {st.issuer, "active"_n} }, { false } );
    }
 }
 
@@ -368,18 +408,16 @@ void token::bonus(name to )
    if ( it_abms->round + 1 == it_br->round ) {
       // not balance update happen after freeze
       to_abms.modify( it_abms, same_payer, [&]( auto &m ) {   
-         m.bonus = calc_bonus( m.balance );
+         m.bonus = calc_bonus( m.owner, m.balance, m.stake );
          m.round = it_br->round;
       });
       // fetch abms after modfication
       it_abms = to_abms.find( to.value );
-      check( it_abms != to_abms.end(), "abms not found, could not bonus" );
    } else if (it_abms->round != it_br->round) {
       check(false, "round number not match, this should not happen");
    }
 
    check( it_br->bonus.symbol == it_abms->bonus.symbol, "bonus symbol should be the same" );
-   // check( it_abms->bonus.amount > 0, "abms bonus should greater than 0" );
 
    auto real_bonus = it_abms->bonus;
    to_abms.modify( it_abms, same_payer, [&]( auto& a ) {
@@ -390,33 +428,23 @@ void token::bonus(name to )
    if (real_bonus.amount < it_br->minmum_bonus.amount) {
       return;
    }
-   // run actual bonus
-   check( real_bonus.amount <= st.max_supply.amount - st.supply.amount, "bonus quantity exceeds available supply");
-
+  
    // update round balance
    bonus_rounds.modify( *it_br, same_payer, [&]( auto &br ) {
       br.balance -= real_bonus;
    });
 
-   // following logic likes issue
-   statstable.modify( st, same_payer, [&]( auto& s ) {
-      s.supply += real_bonus;
-   });
-
-   add_balance( st.issuer, real_bonus, st.issuer );
-
-   if( to != st.issuer ) {
-      SEND_INLINE_ACTION( *this, transfer, { {st.issuer, "active"_n} },
-            { st.issuer, to, real_bonus, "bonus" }
-      );
-   }
+   // issue bonus asset to accout
+   SEND_INLINE_ACTION( *this, issue, { {st.issuer, "active"_n} },
+      { to, real_bonus, "bonus" }
+   );
 }
 
 void token::bonusclose( bool force ) {
    brnd bonus_rounds( _self, HOT_BONUS_SCOPE );
    auto it_br = bonus_rounds.begin();
    check( it_br != bonus_rounds.end(), "bonus round not found" );
-   check( it_br->clearing, "bonus round has not been frozen yet" );
+   check( it_br->clearing, "only bonus round in clearing could be closed" );
 
    stats statstable( _self, it_br->bonus.symbol.code().raw() );
    auto existing = statstable.find( it_br->bonus.symbol.code().raw() );
@@ -453,15 +481,16 @@ void token::bonusclose( bool force ) {
    });
 
    if ( real_bonus.amount > 0 ) {
-      add_balance( st.issuer, real_bonus, st.issuer );
-      if( collector != st.issuer ) {
-         SEND_INLINE_ACTION( *this, transfer, { {st.issuer, "active"_n} },
-               { st.issuer, collector, real_bonus, "bonus close" }
-         );
-      }      
+      SEND_INLINE_ACTION( *this, issue, { {st.issuer, "active"_n} },
+         { collector, real_bonus, "bonusclose" }
+      );   
    }
 }
 
 } /// namespace eosio
 
-EOSIO_DISPATCH( eosio::token, (create)(issue)(transfer)(open)(close)(retire)(bonusfreeze)(bonusclear)(bonus)(bonusclose) )
+EOSIO_DISPATCH( eosio::token, 
+   (create)(issue)(transfer)
+   (staketrans)(open)(close)
+   (retire)(bonusfreeze)
+   (bonusclear)(bonus)(bonusclose) )
