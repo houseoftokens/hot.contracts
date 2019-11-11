@@ -44,6 +44,25 @@ namespace eosio {
          void staketrans( name from, name to, asset quantity, string memo );
 
          [[eosio::action]]
+         void feecharge( name from, name to, asset fee, string memo );
+
+         // fee free issue transfer
+         [[eosio::action]]
+         void issuetrans( name to, asset quantity, string memo );
+
+         // fee free claim transfer
+         [[eosio::action]]
+         void claimtrans( name claimer, name to, asset quantity, string memo );
+
+         // fee free vpay transfer
+         [[eosio::action]]
+         void vpaytrans( name to, asset quantity, string memo );
+
+         // fee free bpay transfer
+         [[eosio::action]]
+         void bpaytrans( name to, asset quantity, string memo );
+
+         [[eosio::action]]
          void bonusfreeze( asset bonus, asset minimum, name collector );
 
          [[eosio::action]]
@@ -80,7 +99,11 @@ namespace eosio {
          using bonusclear_action = eosio::action_wrapper<"bonusclear"_n, &token::bonusclear>;
          using bonus_action = eosio::action_wrapper<"bonus"_n, &token::bonus>;
          using bonusclose_action = eosio::action_wrapper<"bonusclose"_n, &token::bonusclose>;
-         
+         using issuetrans_action = eosio::action_wrapper<"issuetrans"_n, &token::issuetrans>;
+         using feecharge_action = eosio::action_wrapper<"feecharge"_n, &token::feecharge>;
+         using claimtrans_action = eosio::action_wrapper<"claimtrans"_n, &token::claimtrans>;
+         using vpaytrans_action = eosio::action_wrapper<"vpaytrans"_n, &token::vpaytrans>;
+         using bpaytrans_action = eosio::action_wrapper<"bpaytrans"_n, &token::bpaytrans>;
 
          static constexpr eosio::name stake_account{"eosio.stake"_n};
 
@@ -139,6 +162,8 @@ namespace eosio {
          asset add_balance( name owner, asset value, name ram_payer );
          void on_balance_change(name owner, asset balance, name ram_payer, int128_t stake_delta);
          asset calc_bonus(name owner, int64_t balance, int64_t stake) const;
+
+         void fee_free_transfer(name from, name to, asset quantity, string memo, std::vector<name> authes, name res_payer );
    };
 
 } /// namespace eosio

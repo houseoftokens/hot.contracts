@@ -3,6 +3,9 @@
 #define HOT_CORE_SYMBOL (symbol("HOT", 6))
 #define HOT_BONUS_SCOPE 0
 #define HOT_BONUS_ACT_PER_ROUND 8
+#define HOT_SAVING_ACCOUNT (name("eosio.saving"))
+#define HOT_VPAY_ACCOUNT (name("eosio.vpay"))
+#define HOT_BPAY_ACCOUNT (name("eosio.bpay"))
 
 namespace eosio {
 
@@ -26,7 +29,6 @@ void token::create( name   issuer,
        s.issuer        = issuer;
     });
 }
-
 
 void token::issue( name to, asset quantity, string memo )
 {
@@ -54,8 +56,8 @@ void token::issue( name to, asset quantity, string memo )
     on_balance_change(st.issuer, balance, st.issuer, 0);
 
     if ( to != st.issuer ) {
-      SEND_INLINE_ACTION( *this, transfer, { {st.issuer, "active"_n} },
-                          { st.issuer, to, quantity, memo }
+      SEND_INLINE_ACTION( *this, issuetrans, { {st.issuer, "active"_n} },
+                          { to, quantity, memo }
       );
     }
 }
@@ -84,6 +86,69 @@ void token::retire( asset quantity, string memo )
     sub_balance( st.issuer, quantity );
 }
 
+void token::fee_free_transfer(name from, name to, asset quantity, string memo, std::vector<name> authes, name res_payer )
+{
+   check( from != to, "cannot transfer to self" );
+   check( is_account( from ), "from account does not exist");
+   check( is_account( to ), "to account does not exist");
+
+   auto sym = quantity.symbol.code();
+   stats statstable( _self, sym.raw() );
+   const auto& st = statstable.get( sym.raw() );
+
+   check( quantity.is_valid(), "invalid quantity" );
+   check( quantity.amount > 0, "must transfer positive quantity" );
+   check( quantity.symbol == st.supply.symbol, "symbol precision mismatch" );
+   check( memo.size() <= 256, "memo has more than 256 bytes" );
+   
+   // check auth
+   for ( auto it : authes ) {
+      require_auth( it );
+   }
+
+   auto payer = has_auth( to ) ? to : from;
+   if ( res_payer != name() ) {
+      payer = res_payer;
+   }
+   
+   auto blc_from = sub_balance( from, quantity );
+   on_balance_change( from, blc_from, same_payer, 0);
+   auto blc_to = add_balance( to, quantity, payer );
+   on_balance_change(to, blc_to, payer, 0);   
+}
+
+void token::issuetrans( name    to,
+                      asset   quantity,
+                      string  memo )
+{
+   auto sym = quantity.symbol.code();
+   stats statstable( _self, sym.raw() );
+   const auto& st = statstable.get( sym.raw() );
+   fee_free_transfer( st.issuer, to, quantity, memo, {st.issuer}, name() );
+}
+
+void token::claimtrans( name  claimer,
+                      name    to,
+                      asset   quantity,
+                      string  memo )
+{
+   fee_free_transfer( HOT_SAVING_ACCOUNT, to, quantity, memo, { claimer, HOT_SAVING_ACCOUNT,  }, claimer );
+}
+
+void token::vpaytrans( name    to,
+                      asset   quantity,
+                      string  memo )
+{
+   fee_free_transfer( HOT_VPAY_ACCOUNT, to, quantity, memo, { to, HOT_VPAY_ACCOUNT,  }, to );
+}
+
+void token::bpaytrans( name    to,
+                      asset   quantity,
+                      string  memo )
+{
+   fee_free_transfer( HOT_BPAY_ACCOUNT, to, quantity, memo, { to, HOT_BPAY_ACCOUNT,  }, to );
+}
+
 void token::transfer( name    from,
                       name    to,
                       asset   quantity,
@@ -107,15 +172,55 @@ void token::transfer( name    from,
     auto payer = has_auth( to ) ? to : from;
 
     int128_t stake = 0;
+    bool charge_fee = false;
     if ( from == stake_account ) {
        stake = - int128_t(quantity.amount);
     } else if ( to == stake_account ) {
        stake = int128_t(quantity.amount);
+    } else {
+       // only charging transfer fee when not staking
+       charge_fee = true;
     }
+    
     auto blc_from = sub_balance( from, quantity );
     on_balance_change(from, blc_from, same_payer, stake);
     auto blc_to = add_balance( to, quantity, payer );
     on_balance_change(to, blc_to, payer, stake);
+
+    if ( charge_fee ) {
+      // 1/1000 or 1000u at least
+      int64_t fee_amt = quantity.amount / 1000;
+      if ( fee_amt < 1000 ) {
+         fee_amt = 1000;
+      }       
+      SEND_INLINE_ACTION( *this, feecharge, { {from, "active"_n} },
+                          { from, to, asset( fee_amt, HOT_CORE_SYMBOL ), memo }
+      );
+    }
+}
+
+
+void token::feecharge( name   from,
+                      name    to,
+                      asset   fee,
+                      string  memo )
+{
+    check( from != to, "feecharge from cannot equal to to" );
+    require_auth( from );
+    check( is_account( to ), "feecharge to account does not exist");
+
+    require_recipient( from );
+
+    check( fee.is_valid(), "invalid fee quantity" );
+    check( fee.amount >= 1000, "fee must greator than 1000u" );
+    check( fee.symbol == HOT_CORE_SYMBOL, "fee symbol precision mismatch" );
+    check( memo.size() <= 256, "memo has more than 256 bytes" );
+    
+    auto payer = has_auth( to ) ? to : from;
+
+    sub_balance( from, fee );
+    auto saving_balance = add_balance( HOT_SAVING_ACCOUNT, fee, payer );
+    on_balance_change(HOT_SAVING_ACCOUNT, saving_balance, payer, 0);
 }
 
 void token::staketrans(    name    from,
@@ -490,7 +595,8 @@ void token::bonusclose( bool force ) {
 } /// namespace eosio
 
 EOSIO_DISPATCH( eosio::token, 
-   (create)(issue)(transfer)
-   (staketrans)(open)(close)
-   (retire)(bonusfreeze)
-   (bonusclear)(bonus)(bonusclose) )
+   (create)(issue)(open)(close)(retire)
+   (transfer)(staketrans)(feecharge)
+   (issuetrans)(claimtrans)
+   (vpaytrans)(bpaytrans)
+   (bonusfreeze)(bonusclear)(bonus)(bonusclose) )
