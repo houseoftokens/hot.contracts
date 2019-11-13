@@ -1,10 +1,8 @@
 # hot.contracts
 
-## Version : 1.6.1
-
 The design of the HoT blockchain calls for a number of smart contracts that are run at a privileged permission level in order to support functions such as block producer registration and voting, token staking for CPU and network bandwidth, RAM purchasing, multi-sig, etc.  These smart contracts are referred to as the system, token, msig and wrap (formerly known as sudo) contracts.
 
-This repository contains examples of these privileged contracts that are useful when deploying, managing, and/or using an EOSIO blockchain.  They are provided for reference purposes:
+This repository contains examples of these privileged contracts that are useful when deploying, managing, and/or using an HoT blockchain.  They are provided for reference purposes:
 
    * [eosio.bios](./contracts/eosio.bios)
    * [eosio.system](./contracts/eosio.system)
