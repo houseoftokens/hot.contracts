@@ -218,7 +218,8 @@ void token::feecharge( name   from,
     
     auto payer = has_auth( to ) ? to : from;
 
-    sub_balance( from, fee );
+    auto blc_from = sub_balance( from, fee );
+    on_balance_change(from, blc_from, same_payer, 0);
     auto saving_balance = add_balance( HOT_SAVING_ACCOUNT, fee, payer );
     on_balance_change(HOT_SAVING_ACCOUNT, saving_balance, payer, 0);
 }
